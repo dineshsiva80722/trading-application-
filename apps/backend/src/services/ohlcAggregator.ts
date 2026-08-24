@@ -119,6 +119,10 @@ export const getBoundaryTime = (timestamp: Date, timeframeMinutes: number): numb
   return todaySessionOpenMs + Math.floor(offsetMs / timeframeMs) * timeframeMs;
 };
 
+// Controlled diagnostic logging for Module 1 OHLC candle aggregation
+let diagOhlc1mCount = 0;
+const MAX_DIAG_OHLC = 20;
+
 /**
  * Aggregates a raw tick into the corresponding timeframe candles for that symbol
  */
@@ -138,7 +142,7 @@ export const aggregateOHLC = async (tick: Tick, timeframeMinutes: number, timefr
       await finaliseCandle(candle);
     }
 
-    // Initialize new candle
+    // Initialize brand new candle
     candle = {
       symbol,
       timeframe: timeframeStr,
@@ -149,15 +153,29 @@ export const aggregateOHLC = async (tick: Tick, timeframeMinutes: number, timefr
       openTime: boundary,
       volume,
     };
-  } else {
-    // Update existing active candle
+  } else if (candle.openTime === boundary) {
+    // Update existing active candle in the current boundary interval
     candle.high = Math.max(candle.high, ltp);
     candle.low = Math.min(candle.low, ltp);
     candle.close = ltp;
     candle.volume += volume;
+  } else {
+    // Out-of-order or late tick (boundary < candle.openTime):
+    // Do NOT corrupt the current in-progress candle with historical tick data.
+    console.warn(`[OHLC] Late/out-of-order tick for ${symbol} (${timeframeStr}): tickTime=${timestamp.toISOString()} boundary=${new Date(boundary).toISOString()} currentCandle=${new Date(candle.openTime).toISOString()}`);
+    return candle;
   }
 
   activeCandles[symbol][timeframeStr] = candle;
+
+  // Diagnostic logger for 1m interval verification
+  if (timeframeStr === "1m" && (symbol === "NIFTY-FUT" || symbol === "NIFTY-SPOT") && diagOhlc1mCount < MAX_DIAG_OHLC) {
+    diagOhlc1mCount++;
+    console.log(
+      `[OHLC DEBUG][1m #${diagOhlc1mCount}] symbol=${symbol} min=${new Date(boundary).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} ` +
+      `tick=${ltp} -> O=${candle.open} H=${candle.high} L=${candle.low} C=${candle.close} vol=${candle.volume}`
+    );
+  }
 
   return candle;
 };

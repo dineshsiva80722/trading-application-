@@ -133,6 +133,45 @@ const buildInstrumentMap = (instruments: ZebuInstrument[]) => {
 // Tick (OI/volume update) instead of being dropped and logged as "unrecognized".
 const lastKnownLtp = new Map<string, number>();
 
+// Controlled diagnostic logging for Module 1 raw tick verification
+let diagFutTickCount = 0;
+let diagSpotTickCount = 0;
+const MAX_DIAG_TICKS = 20;
+
+const parseZebuTimestamp = (rawFt?: any): Date => {
+  if (!rawFt) return new Date();
+  const num = Number(rawFt);
+  if (Number.isFinite(num) && num > 0) {
+    // If epoch > 1e11 it's in milliseconds; if <= 1e11 it's in seconds
+    return num > 1e11 ? new Date(num) : new Date(num * 1000);
+  }
+  return new Date();
+};
+
+const logDiagnosticTick = (payload: any, tick: Tick) => {
+  const isFut = tick.symbol === "NIFTY-FUT";
+  const isSpot = tick.symbol === "NIFTY-SPOT";
+  if (!isFut && !isSpot) return;
+
+  if (isFut && diagFutTickCount < MAX_DIAG_TICKS) {
+    diagFutTickCount++;
+    console.log(
+      `[ZEBU TICK DIAG][FUT #${diagFutTickCount}/${MAX_DIAG_TICKS}] ` +
+      `symbol=${tick.symbol} ltp=${tick.ltp} rawLtp=${payload.lp ?? payload.ltp ?? "—"} ` +
+      `rawO=${payload.o ?? "—"} rawH=${payload.h ?? "—"} rawL=${payload.l ?? "—"} rawC=${payload.c ?? "—"} ` +
+      `ft=${payload.ft ?? "—"} ts=${tick.timestamp.toISOString()} vol=${tick.volume} oi=${tick.oi ?? "—"}`
+    );
+  } else if (isSpot && diagSpotTickCount < MAX_DIAG_TICKS) {
+    diagSpotTickCount++;
+    console.log(
+      `[ZEBU TICK DIAG][SPOT #${diagSpotTickCount}/${MAX_DIAG_TICKS}] ` +
+      `symbol=${tick.symbol} ltp=${tick.ltp} rawLtp=${payload.lp ?? payload.ltp ?? "—"} ` +
+      `rawO=${payload.o ?? "—"} rawH=${payload.h ?? "—"} rawL=${payload.l ?? "—"} rawC=${payload.c ?? "—"} ` +
+      `ft=${payload.ft ?? "—"} ts=${tick.timestamp.toISOString()}`
+    );
+  }
+};
+
 const toTick = (payload: any, symbolByKey: Map<string, string>): Tick | null => {
   const exchange = payload.e || payload.exch || payload.exchange;
   const token = payload.tk || payload.token || payload.instrumentToken;
@@ -156,14 +195,18 @@ const toTick = (payload: any, symbolByKey: Map<string, string>): Tick | null => 
     lastKnownLtp.set(symbolKey, ltp);
   }
 
-  return {
+  const tick: Tick = {
     symbol: symbolKey,
     ltp,
-    timestamp: payload.ft ? new Date(Number(payload.ft) * 1000) : new Date(),
+    timestamp: parseZebuTimestamp(payload.ft),
     volume: payload.v ? Number(payload.v) : payload.volume ? Number(payload.volume) : 0,
     oi: rawOi !== undefined ? Number(rawOi) : undefined,
     exchange: exchange ? String(exchange) : undefined,
   };
+
+  logDiagnosticTick(payload, tick);
+
+  return tick;
 };
 
 export const startZebuMarketDataFeed = (
