@@ -113,10 +113,17 @@ export const readLive = async (key: string): Promise<string | null> => {
     return null;
   }
   readRedisFallbacks++;
-  const value = await redis.get(key);
-  if (value != null) {
-    mirror.set(key, String(value));
-    return String(value);
+  try {
+    const value = await redis.get(key);
+    if (value != null) {
+      mirror.set(key, String(value));
+      return String(value);
+    }
+  } catch (err: any) {
+    if (Date.now() - lastErrorLogTs > 10_000) {
+      console.warn(`[RedisBuffer] readLive('${key}') failed (${err?.message || err}), falling back to in-memory store`);
+      lastErrorLogTs = Date.now();
+    }
   }
   absentUntil.set(key, Date.now() + ABSENT_CACHE_MS);
   return null;

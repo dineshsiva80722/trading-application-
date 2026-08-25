@@ -120,8 +120,8 @@ export const getRecentCandles = async (instrumentId: string, limit = 50): Promis
 
   const cappedLimit = Math.max(1, Math.min(limit, HISTORY_LIMIT));
   try {
-    const raw = await client.lrange<string>(historyKey(instrumentId), 0, cappedLimit - 1);
-    return raw.map((r) => (typeof r === "string" ? JSON.parse(r) : r) as PersistedCandle);
+    const raw: any[] = await (client as any).lrange(historyKey(instrumentId), 0, cappedLimit - 1);
+    return (raw || []).map((r: any) => (typeof r === "string" ? JSON.parse(r) : r) as PersistedCandle);
   } catch (err: any) {
     console.error(`[CandleHistory] getRecentCandles failed for ${instrumentId}:`, err?.message || err);
     return [];

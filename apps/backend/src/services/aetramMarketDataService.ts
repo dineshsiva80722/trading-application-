@@ -129,11 +129,17 @@ export interface AetramInstrumentResult {
 const searchCache = new Map<string, { timestamp: number; data: AetramInstrumentResult[] }>();
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
 
+const inFlightSearches = new Map<string, Promise<AetramInstrumentResult[]>>();
+
 export const searchInstruments = async (searchString: string): Promise<AetramInstrumentResult[]> => {
   const cacheKey = searchString.trim().toUpperCase();
   const cached = searchCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < SEARCH_CACHE_TTL_MS) {
     return cached.data;
+  }
+
+  if (inFlightSearches.has(cacheKey)) {
+    return inFlightSearches.get(cacheKey)!;
   }
 
   const baseUrl = getBaseUrl();
@@ -146,38 +152,45 @@ export const searchInstruments = async (searchString: string): Promise<AetramIns
 
   if (!getMarketDataToken()) return [];
 
-  try {
-    const searchUrl = `${baseUrl}/search/instruments?searchString=${encodeURIComponent(searchString)}`;
-    const response = await axios.get(searchUrl, { headers: getHeaders(), timeout: 10000 });
+  const searchPromise = (async () => {
+    try {
+      const searchUrl = `${baseUrl}/search/instruments?searchString=${encodeURIComponent(searchString)}`;
+      const response = await axios.get(searchUrl, { headers: getHeaders(), timeout: 10000 });
 
-    // "type" is the success/failure discriminant per the XTS response envelope
-    // (code carries a granular id like "s-response-0001", never "success").
-    if (response.data?.type !== "success" || !Array.isArray(response.data.result)) return [];
+      if (response.data?.type !== "success" || !Array.isArray(response.data.result)) return [];
 
-    return response.data.result.map((inst: any) => ({
-      exchangeSegment: Number(inst.ExchangeSegment ?? inst.exchangeSegment ?? 2),
-      exchangeInstrumentID: String(inst.ExchangeInstrumentID ?? inst.exchangeInstrumentID ?? ""),
-      name: String(inst.Name ?? inst.name ?? inst.symbol ?? ""),
-      tradingSymbol: String(inst.TradingSymbol ?? inst.tradingSymbol ?? inst.DisplayName ?? inst.displayName ?? ""),
-      series: String(inst.Series ?? inst.series ?? ""),
-      instrumentType: String(inst.InstrumentType ?? inst.instrumentType ?? inst.Series ?? inst.series ?? ""),
-      expiryDate: inst.ContractExpiration || inst.contractExpiration || inst.ExpiryDate || inst.expiryDate || inst.Expiry || inst.expiry || undefined,
-      strikePrice: inst.StrikePrice !== undefined ? Number(inst.StrikePrice)
-        : inst.strikePrice !== undefined ? Number(inst.strikePrice)
-          : inst.Strike !== undefined ? Number(inst.Strike)
-            : inst.strike !== undefined ? Number(inst.strike) : undefined,
-      optionType: inst.OptionType || inst.optionType || inst.Type || inst.type || undefined,
-    }));
-  } catch (error: any) {
-    if (error?.response?.status === 401) {
-      console.warn("[AetramMD] Session expired (401) during instrument search.");
-      clearAetramSession();
-      broadcastBrokerStatus("session-expired", "Broker session expired. Please login again.", "module2");
-    } else {
-      console.error(`[AetramMD] Instrument search error for "${searchString}":`, error?.message || error);
+      const parsedResults = response.data.result.map((inst: any) => ({
+        exchangeSegment: Number(inst.ExchangeSegment ?? inst.exchangeSegment ?? 2),
+        exchangeInstrumentID: String(inst.ExchangeInstrumentID ?? inst.exchangeInstrumentID ?? ""),
+        name: String(inst.Name ?? inst.name ?? inst.symbol ?? ""),
+        tradingSymbol: String(inst.TradingSymbol ?? inst.tradingSymbol ?? inst.DisplayName ?? inst.displayName ?? ""),
+        series: String(inst.Series ?? inst.series ?? ""),
+        instrumentType: String(inst.InstrumentType ?? inst.instrumentType ?? inst.Series ?? inst.series ?? ""),
+        expiryDate: inst.ContractExpiration || inst.contractExpiration || inst.ExpiryDate || inst.expiryDate || inst.Expiry || inst.expiry || undefined,
+        strikePrice: inst.StrikePrice !== undefined ? Number(inst.StrikePrice)
+          : inst.strikePrice !== undefined ? Number(inst.strikePrice)
+            : inst.Strike !== undefined ? Number(inst.Strike)
+              : inst.strike !== undefined ? Number(inst.strike) : undefined,
+        optionType: inst.OptionType || inst.optionType || inst.Type || inst.type || undefined,
+      }));
+      searchCache.set(cacheKey, { timestamp: Date.now(), data: parsedResults });
+      return parsedResults;
+    } catch (error: any) {
+      if (error?.response?.status === 401) {
+        console.warn("[AetramMD] Session expired (401) during instrument search.");
+        clearAetramSession();
+        broadcastBrokerStatus("session-expired", "Broker session expired. Please login again.", "module2");
+      } else {
+        console.error(`[AetramMD] Instrument search error for "${searchString}":`, error?.message || error);
+      }
+      return [];
+    } finally {
+      inFlightSearches.delete(cacheKey);
     }
-    return [];
-  }
+  })();
+
+  inFlightSearches.set(cacheKey, searchPromise);
+  return searchPromise;
 };
 
 /**
@@ -219,14 +232,13 @@ export const resolveOptionStrikeToken = async (
 
   const indexShort = index.replace("50", "").replace("fifty", "").toUpperCase(); // e.g. "NIFTY"
 
-  // Search by "NIFTY 22000" first, fallback to "NIFTY"
-  const primarySearch = `${indexShort} ${strikePrice}`;
-  console.log(`[AetramMD] Searching Aetram instruments with query: '${primarySearch}'`);
-  let results = await searchInstruments(primarySearch);
+  // Search by index query first so single search result populates all option strikes
+  let results = await searchInstruments(indexShort);
 
   if (results.length === 0) {
-    console.log(`[AetramMD] Search '${primarySearch}' yielded 0 results. Trying index query: '${indexShort}'`);
-    results = await searchInstruments(indexShort);
+    const fallbackSearch = `${indexShort} ${strikePrice}`;
+    console.log(`[AetramMD] Search '${indexShort}' yielded 0 results. Trying query: '${fallbackSearch}'`);
+    results = await searchInstruments(fallbackSearch);
   }
 
   if (results.length === 0) {
@@ -287,7 +299,11 @@ export const resolveOptionStrikeToken = async (
     const result = { segment, token };
     symbolToTokenMap.set(strikeSymbol, result);
     tokenToSymbolMap.set(`${segment}|${token}`, strikeSymbol);
+    tokenToSymbolMap.set(`${segment}|${String(token)}`, strikeSymbol);
+    tokenToSymbolMap.set(`${segment}|${Number(token)}`, strikeSymbol);
+    tokenToSymbolMap.set(String(token), strikeSymbol);
     tokenToSymbolMap.set(token, strikeSymbol);
+    (tokenToSymbolMap as any).set(Number(token), strikeSymbol);
 
     console.log(`[INSTRUMENT][RESOLVED] symbol=${strikeSymbol} segment=${segment} token=${token} expiry=${matchInst.ymd} strike=${strikePrice} optionType=${optionType}`);
     return result;
@@ -422,18 +438,34 @@ marketDataEvents.on("MARKET_DATA", (event: NormalizedMarketEvent) => {
 
 marketDataEvents.on("LTP_UPDATED", (event: NormalizedMarketEvent) => {
   if (!event.exchangeInstrumentID || event.lastPrice === null) return;
-  const symbol = (event.exchangeSegment ? tokenToSymbolMap.get(`${event.exchangeSegment}|${event.exchangeInstrumentID}`) : null) || tokenToSymbolMap.get(event.exchangeInstrumentID);
+  const rawId = String(event.exchangeInstrumentID);
+  const numId = Number(event.exchangeInstrumentID);
+  const seg = event.exchangeSegment;
+  const symbol = (seg ? tokenToSymbolMap.get(`${seg}|${rawId}`) : null)
+    || (seg ? tokenToSymbolMap.get(`${seg}|${numId}`) : null)
+    || tokenToSymbolMap.get(rawId)
+    || (tokenToSymbolMap as any).get(numId);
+
   if (symbol) {
     bufferSet(`ltp:${symbol}`, String(event.lastPrice));
-    console.log(`[AETRAM][TICK] token=${event.exchangeInstrumentID} symbol=${symbol} ltp=${event.lastPrice}`);
+    console.log(`[AETRAM][TICK] token=${rawId} symbol=${symbol} ltp=${event.lastPrice}`);
     console.log(`[REDIS][LIVE] key=ltp:${symbol} value=${event.lastPrice}`);
     onLiveTickReceived(symbol, event.lastPrice);
+  } else {
+    console.log(`[AETRAM][TICK_UNMAPPED] token=${rawId} seg=${seg} ltp=${event.lastPrice}`);
   }
 });
 
 marketDataEvents.on("OI_UPDATED", (event: NormalizedMarketEvent) => {
   if (!event.exchangeInstrumentID || event.openInterest === null) return;
-  const symbol = (event.exchangeSegment ? tokenToSymbolMap.get(`${event.exchangeSegment}|${event.exchangeInstrumentID}`) : null) || tokenToSymbolMap.get(event.exchangeInstrumentID);
+  const rawId = String(event.exchangeInstrumentID);
+  const numId = Number(event.exchangeInstrumentID);
+  const seg = event.exchangeSegment;
+  const symbol = (seg ? tokenToSymbolMap.get(`${seg}|${rawId}`) : null)
+    || (seg ? tokenToSymbolMap.get(`${seg}|${numId}`) : null)
+    || tokenToSymbolMap.get(rawId)
+    || (tokenToSymbolMap as any).get(numId);
+
   if (symbol) {
     bufferSet(`oi:${symbol}`, String(event.openInterest));
     console.log(`[REDIS][LIVE] key=oi:${symbol} value=${event.openInterest}`);

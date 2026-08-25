@@ -86,7 +86,8 @@ export const authenticate = async (
     const decoded = verifyAccessToken(token);
     req.user = { id: decoded.userId };
     next();
-  } catch (error) {
-    return res.status(401).json({ error: "Invalid or expired access token." });
+  } catch (error: any) {
+    console.error("[Auth Middleware Error]:", error?.message || error);
+    return res.status(401).json({ error: "Invalid or expired access token.", detail: error?.message });
   }
 };

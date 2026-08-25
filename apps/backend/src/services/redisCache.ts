@@ -85,7 +85,7 @@ export class RedisCache<T> implements CacheStore<T> {
     if (!client) return this.mirror.get(key);
 
     try {
-      const raw = await client.get<string>(this.redisKey(key));
+      const raw = await (client as any).get(this.redisKey(key));
       if (raw === null || raw === undefined) return this.mirror.get(key);
       const value = (typeof raw === "string" ? JSON.parse(raw) : raw) as T;
       this.mirror.set(key, value);

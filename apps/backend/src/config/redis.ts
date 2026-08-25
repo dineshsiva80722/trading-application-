@@ -15,22 +15,137 @@ const rawUpstashUrl = process.env.UPSTASH_REDIS_REST_URL;
 const upstashUrl = sanitizeUrl(rawUpstashUrl);
 const upstashToken = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 
-class MockRedis {
+export class MockPipeline {
+  private ops: Array<() => Promise<any>> = [];
+  constructor(private mockRedis: MockRedis) {}
+
+  set(key: string, value: string): this {
+    this.ops.push(() => this.mockRedis.set(key, value));
+    return this;
+  }
+
+  setex(key: string, seconds: number, value: string): this {
+    this.ops.push(() => this.mockRedis.setex(key, seconds, value));
+    return this;
+  }
+
+  del(key: string): this {
+    this.ops.push(() => this.mockRedis.del(key));
+    return this;
+  }
+
+  get(key: string): this {
+    this.ops.push(() => this.mockRedis.get(key));
+    return this;
+  }
+
+  lpush(key: string, ...values: string[]): this {
+    this.ops.push(() => this.mockRedis.lpush(key, ...values));
+    return this;
+  }
+
+  ltrim(key: string, start: number, stop: number): this {
+    this.ops.push(() => this.mockRedis.ltrim(key, start, stop));
+    return this;
+  }
+
+  async exec(): Promise<any[]> {
+    const results: any[] = [];
+    for (const op of this.ops) {
+      results.push(await op());
+    }
+    return results;
+  }
+}
+
+export class MockRedis {
   private store = new Map<string, string>();
+  private listStore = new Map<string, string[]>();
+  private ttls = new Map<string, NodeJS.Timeout>();
 
   async get(key: string): Promise<string | null> {
-    return this.store.get(key) || null;
+    return this.store.get(key) ?? null;
   }
 
   async set(key: string, value: string): Promise<string> {
-    this.store.set(key, value);
+    const existing = this.ttls.get(key);
+    if (existing) {
+      clearTimeout(existing);
+      this.ttls.delete(key);
+    }
+    this.store.set(key, String(value));
     return "OK";
   }
 
   async setex(key: string, seconds: number, value: string): Promise<string> {
-    this.store.set(key, value);
-    setTimeout(() => this.store.delete(key), seconds * 1000);
+    const existing = this.ttls.get(key);
+    if (existing) {
+      clearTimeout(existing);
+      this.ttls.delete(key);
+    }
+    this.store.set(key, String(value));
+    const timer = setTimeout(() => {
+      this.store.delete(key);
+      this.ttls.delete(key);
+    }, Math.max(1, seconds) * 1000);
+    this.ttls.set(key, timer);
     return "OK";
+  }
+
+  async del(key: string): Promise<number> {
+    const existing = this.ttls.get(key);
+    if (existing) {
+      clearTimeout(existing);
+      this.ttls.delete(key);
+    }
+    const existed = this.store.delete(key) || this.listStore.delete(key);
+    return existed ? 1 : 0;
+  }
+
+  async ttl(key: string): Promise<number> {
+    return this.store.has(key) || this.listStore.has(key) ? -1 : -2;
+  }
+
+  async expire(key: string, seconds: number): Promise<number> {
+    if (!this.store.has(key) && !this.listStore.has(key)) return 0;
+    const existing = this.ttls.get(key);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.store.delete(key);
+      this.listStore.delete(key);
+      this.ttls.delete(key);
+    }, Math.max(1, seconds) * 1000);
+    this.ttls.set(key, timer);
+    return 1;
+  }
+
+  async lpush(key: string, ...values: string[]): Promise<number> {
+    const list = this.listStore.get(key) || [];
+    list.unshift(...values);
+    this.listStore.set(key, list);
+    return list.length;
+  }
+
+  async ltrim(key: string, start: number, stop: number): Promise<string> {
+    const list = this.listStore.get(key) || [];
+    const end = stop < 0 ? list.length + stop + 1 : stop + 1;
+    const trimmed = list.slice(start, end);
+    this.listStore.set(key, trimmed);
+    return "OK";
+  }
+
+  async lrange(key: string, start: number, stop: number): Promise<string[]> {
+    const list = this.listStore.get(key) || [];
+    const end = stop < 0 ? list.length + stop + 1 : stop + 1;
+    return list.slice(start, end);
+  }
+
+  async llen(key: string): Promise<number> {
+    return (this.listStore.get(key) || []).length;
+  }
+
+  pipeline(): MockPipeline {
+    return new MockPipeline(this);
   }
 
   async ping(): Promise<string> {
@@ -49,6 +164,18 @@ class MockRedis {
 
 let activeClient: any;
 
+function fallbackToMock(reason: string) {
+  if (!(activeClient instanceof MockRedis)) {
+    console.warn(`[Redis] Redis operation failed (${reason}). Falling back to IN-MEMORY MOCK REDIS cache.`);
+    try {
+      if (typeof activeClient?.disconnect === "function") {
+        activeClient.disconnect();
+      }
+    } catch {}
+    activeClient = new MockRedis();
+  }
+}
+
 try {
   // Try Upstash REST API first if credentials are available
   if (upstashUrl && upstashToken) {
@@ -56,6 +183,9 @@ try {
       activeClient = new UpstashRedis({
         url: upstashUrl,
         token: upstashToken,
+        retry: {
+          retries: 0,
+        },
       });
       console.log(`[Redis] REAL UPSTASH REDIS connected successfully (${upstashUrl}).`);
     } catch (upstashError: any) {
@@ -71,16 +201,7 @@ try {
     });
 
     activeClient.on("error", (err: any) => {
-      if (!(activeClient instanceof MockRedis)) {
-        console.warn("[Redis] Standard Redis connection failed. Falling back to IN-MEMORY MOCK REDIS.");
-        const oldClient = activeClient;
-        activeClient = new MockRedis();
-        try {
-          oldClient.disconnect();
-        } catch (e) {
-          // ignore error during disconnect
-        }
-      }
+      fallbackToMock(err?.message || "Standard Redis error");
     });
   }
 } catch (error: any) {
@@ -88,17 +209,53 @@ try {
   activeClient = new MockRedis();
 }
 
-// Proxy wrapper to expose the active client dynamically to all modules importing it
+// Proxy wrapper to expose the active client dynamically and auto-fallback on error
 const proxy = new Proxy({} as any, {
-  get(target, prop) {
-    const value = activeClient[prop];
-    if (typeof value === "function") {
-      return function (...args: any[]) {
-        return value.apply(activeClient, args);
+  get(_target, prop) {
+    if (prop === "pipeline") {
+      return function () {
+        if (typeof activeClient?.pipeline === "function") {
+          try {
+            const p = activeClient.pipeline();
+            const origExec = p.exec.bind(p);
+            p.exec = async function (...args: any[]) {
+              try {
+                return await origExec(...args);
+              } catch (err: any) {
+                fallbackToMock(err?.message || String(err));
+                return [];
+              }
+            };
+            return p;
+          } catch (err: any) {
+            fallbackToMock(err?.message || String(err));
+            return new MockPipeline(activeClient instanceof MockRedis ? activeClient : new MockRedis());
+          }
+        }
+        return new MockPipeline(activeClient instanceof MockRedis ? activeClient : new MockRedis());
       };
     }
-    return value;
-  }
+
+    if (typeof activeClient?.[prop] === "function") {
+      return async function (...args: any[]) {
+        const currentFn = activeClient?.[prop];
+        if (typeof currentFn === "function") {
+          try {
+            return await currentFn.apply(activeClient, args);
+          } catch (err: any) {
+            fallbackToMock(err?.message || String(err));
+            const fallbackFn = (activeClient as any)?.[prop];
+            if (typeof fallbackFn === "function") {
+              return await fallbackFn.apply(activeClient, args);
+            }
+            return null;
+          }
+        }
+        return null;
+      };
+    }
+    return activeClient?.[prop];
+  },
 });
 
 export default proxy;

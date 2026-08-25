@@ -32,17 +32,22 @@ export const syncAetramSubscriptions = async () => {
   const desiredMap = new Map<string, { segment: number; token: string }>();
 
   for (const session of Object.values(activeSessions)) {
-    for (const strike of session.selectedStrikes) {
-      try {
-        const inst = await resolveOptionStrikeToken(session.indexSymbol, session.expiryDate, strike);
-        if (inst) {
-          const key = `${inst.segment}|${inst.token}`;
-          desiredMap.set(key, inst);
-        } else {
-          console.error(`[MODULE2][TRACKER][INSTRUMENT] Failed to resolve strike ${strike}`);
+    const resolvedList = await Promise.all(
+      session.selectedStrikes.map(async (strike) => {
+        try {
+          const inst = await resolveOptionStrikeToken(session.indexSymbol, session.expiryDate, strike);
+          return inst;
+        } catch (err) {
+          console.error(`[MODULE2][TRACKER][INSTRUMENT] Error resolving Aetram strike ${strike}:`, err);
+          return null;
         }
-      } catch (err) {
-        console.error(`[MODULE2][TRACKER][INSTRUMENT] Error resolving Aetram strike ${strike}:`, err);
+      })
+    );
+
+    for (const inst of resolvedList) {
+      if (inst) {
+        const key = `${inst.segment}|${inst.token}`;
+        desiredMap.set(key, inst);
       }
     }
   }
@@ -259,7 +264,8 @@ const executeMinuteBoundary = async () => {
 
       // If price from Redis is 0/missing, fallback to previous price
       if (ltp === 0 && strikeState.grid.length > 0) {
-        ltp = strikeState.grid[strikeState.grid.length - 1].ltp;
+        const lastValid = [...strikeState.grid].reverse().find((c) => c.ltp > 0);
+        ltp = lastValid ? lastValid.ltp : (strikeState.dayOpen || 0);
       } else if (ltp === 0) {
         ltp = strikeState.dayOpen || 0;
       }
@@ -570,10 +576,12 @@ export const startTrackerSession = async (
   // Add to local active sessions cache
   activeSessions[sessionId] = sessionData;
 
-  // Trigger Aetram subscription synchronization in the background
-  syncAetramSubscriptions().catch((err) =>
-    console.error("[TrackerEngine] Aetram subscription sync failed:", err)
-  );
+  // Trigger Aetram subscription synchronization
+  try {
+    await syncAetramSubscriptions();
+  } catch (err) {
+    console.error("[TrackerEngine] Aetram subscription sync failed:", err);
+  }
 
   return sessionData;
 };
@@ -865,6 +873,15 @@ export const onLiveTickReceived = (symbol: string, ltp: number) => {
 
       const denominator = strikeState.dayOpen || ltp;
       strikeState.pctChange = denominator > 0 ? Number((((ltp - denominator) / denominator) * 100).toFixed(2)) : 0;
+
+      // Update any initial 0 LTP cell in grid if this is the first live price
+      for (const cell of strikeState.grid) {
+        if (cell.ltp === 0 && ltp > 0) {
+          cell.ltp = ltp;
+          cell.isHigh = true;
+          cell.isLow = true;
+        }
+      }
 
       // Find or create current active minute cell in grid
       let currentCell = strikeState.grid.find(c => c.timestamp === timeString || c.minute === currentMinute);

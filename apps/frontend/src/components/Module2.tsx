@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useStore } from "../store/useStore";
 import { api } from "../utils/api";
@@ -170,7 +170,7 @@ function MultiSelectStrikeDropdown({
   const colorTheme = type === "CE" ? GREEN : RED;
 
   return (
-    <div ref={containerRef} style={{ display: "flex", flexDirection: "column", gap: 6, position: "relative", minWidth: 170, flex: 1 }}>
+    <div ref={containerRef} style={{ display: "flex", flexDirection: "column", gap: 6, position: "relative", minWidth: 170, flex: 1, zIndex: isOpen ? 50 : "auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <label style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 600, color: "var(--trading-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
           {label}
@@ -231,7 +231,7 @@ function MultiSelectStrikeDropdown({
             top: "calc(100% + 4px)",
             left: 0,
             right: 0,
-            zIndex: 100,
+            zIndex: 1000,
             background: "var(--trading-surface)",
             border: "1.5px solid var(--trading-border)",
             borderRadius: 8,
@@ -372,6 +372,35 @@ export const Module2 = ({ isSplit = false }: { isSplit?: boolean }) => {
   const [expiryDate, setExpiryDate] = useState("");
   const [selectedStrikes, setSelectedStrikes] = useState<string[]>([]);
   const [strikeWarning, setStrikeWarning] = useState<string | null>(null);
+
+  const fullscreenTablesRef = useRef<HTMLDivElement>(null);
+  const [isTablesFullscreen, setIsTablesFullscreen] = useState(false);
+
+  const toggleTablesFullscreen = useCallback(() => {
+    if (isTablesFullscreen) {
+      if (document.fullscreenElement) {
+        document.exitFullscreen?.().catch(() => { /* ignore */ });
+      }
+      setIsTablesFullscreen(false);
+      return;
+    }
+    const el = fullscreenTablesRef.current;
+    if (el?.requestFullscreen) {
+      el.requestFullscreen()
+        .then(() => setIsTablesFullscreen(true))
+        .catch(() => setIsTablesFullscreen(true));
+    } else {
+      setIsTablesFullscreen(true);
+    }
+  }, [isTablesFullscreen]);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement) setIsTablesFullscreen(false);
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
 
   // OHLC Field Selection state (Default: all 4 fields)
   const [selectedOHLCFields, setSelectedOHLCFields] = useState<string[]>(["open", "high", "low", "close"]);
@@ -841,6 +870,8 @@ export const Module2 = ({ isSplit = false }: { isSplit?: boolean }) => {
                 background: "var(--trading-surface)", border: "1.5px solid var(--trading-border)",
                 borderRadius: 14, padding: "18px 22px",
                 boxShadow: "0 1px 8px rgba(0,0,0,0.05)", animationDelay: "0.04s",
+                position: "relative",
+                zIndex: 50,
               }}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -1041,40 +1072,94 @@ export const Module2 = ({ isSplit = false }: { isSplit?: boolean }) => {
             )
           )}
 
-          {/* CE Table */}
-          <div className="m2-section" style={{ animationDelay: "0.1s" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: GREEN, display: "inline-block" }} />
-              <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 700, color: GREEN, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                CE Strikes
-              </span>
+          {/* Tables Container with Combined Fullscreen support (both CE & PE together) */}
+          <div
+            ref={fullscreenTablesRef}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: isSplit ? 12 : 20,
+              position: isTablesFullscreen ? "fixed" : "relative",
+              ...(isTablesFullscreen
+                ? {
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    width: "100vw",
+                    height: "100vh",
+                    zIndex: 9999,
+                    background: "var(--trading-bg)",
+                    padding: "16px 20px 24px",
+                    overflowY: "auto",
+                    boxSizing: "border-box",
+                  }
+                : {}),
+            }}
+          >
+            {/* Fullscreen Header / Action Bar */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: -4 }}>
+              {isTablesFullscreen ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: GREEN, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Module 02 · Live Strike Tracker
+                  </span>
+                  <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 12, fontWeight: 600, color: "var(--trading-text-muted)", background: "var(--trading-surface)", padding: "2px 8px", borderRadius: 6, border: "1px solid var(--trading-border)" }}>
+                    {currentSession?.indexSymbol || indexSymbol} · {currentSession?.expiryDate || expiryDate}
+                  </span>
+                </div>
+              ) : <div />}
+              <button
+                type="button"
+                onClick={toggleTablesFullscreen}
+                title={isTablesFullscreen ? "Exit full screen" : "Full screen tables"}
+                aria-label={isTablesFullscreen ? "Exit full screen" : "Full screen tables"}
+                style={{
+                  width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center",
+                  border: "1px solid var(--trading-border)", borderRadius: 6, background: "var(--trading-surface)",
+                  cursor: "pointer", fontSize: 14, lineHeight: 1, color: "var(--trading-text-active)", padding: 0,
+                  boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
+                }}
+              >
+                {isTablesFullscreen ? "✖" : "⛶"}
+              </button>
             </div>
-            <StrikeTrackerTable
-              strikesList={ceStrikesList}
-              session={currentSession}
-              sortedTimestamps={sortedTimestamps}
-              selectedOHLCFields={selectedOHLCFields}
-              isSplit={isSplit}
-              isClosed={isClosed}
-            />
-          </div>
 
-          {/* PE Table */}
-          <div className="m2-section" style={{ animationDelay: "0.13s" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: RED, display: "inline-block" }} />
-              <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 700, color: RED, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                PE Strikes
-              </span>
+            {/* CE Table */}
+            <div className="m2-section" style={{ animationDelay: "0.1s", position: "relative", zIndex: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: GREEN, display: "inline-block" }} />
+                <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 700, color: GREEN, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                  CE Strikes
+                </span>
+              </div>
+              <StrikeTrackerTable
+                strikesList={ceStrikesList}
+                session={currentSession}
+                sortedTimestamps={sortedTimestamps}
+                selectedOHLCFields={selectedOHLCFields}
+                isSplit={isSplit}
+                isClosed={isClosed}
+              />
             </div>
-            <StrikeTrackerTable
-              strikesList={peStrikesList}
-              session={currentSession}
-              sortedTimestamps={sortedTimestamps}
-              selectedOHLCFields={selectedOHLCFields}
-              isSplit={isSplit}
-              isClosed={isClosed}
-            />
+
+            {/* PE Table */}
+            <div className="m2-section" style={{ animationDelay: "0.13s", position: "relative", zIndex: 5 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: RED, display: "inline-block" }} />
+                <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 700, color: RED, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                  PE Strikes
+                </span>
+              </div>
+              <StrikeTrackerTable
+                strikesList={peStrikesList}
+                session={currentSession}
+                sortedTimestamps={sortedTimestamps}
+                selectedOHLCFields={selectedOHLCFields}
+                isSplit={isSplit}
+                isClosed={isClosed}
+              />
+            </div>
           </div>
 
         </div>
@@ -1343,7 +1428,7 @@ function StrikeTrackerTable({
                     {/* Minute columns with ROW-WISE cell-background color logic */}
                     {displayedTimestamps.map((ts) => {
                       const cell = (s.grid || []).find((c: any) => c.timestamp === ts);
-                      if (!cell || typeof cell.ltp !== "number") return <td key={ts} className="m2-td" style={{ padding: cellPadding, fontSize: cellFontSize, textAlign: "center", color: "var(--trading-text-muted)" }}>—</td>;
+                      if (!cell || typeof cell.ltp !== "number" || isNaN(cell.ltp)) return <td key={ts} className="m2-td" style={{ padding: cellPadding, fontSize: cellFontSize, textAlign: "center", color: "var(--trading-text-muted)" }}>—</td>;
                       
                       const isHighest = hasDistinctRowMinMax && cell.ltp === rowMax;
                       const isLowest  = hasDistinctRowMinMax && cell.ltp === rowMin;
@@ -1368,7 +1453,7 @@ function StrikeTrackerTable({
                             fontWeight: isHighest || isLowest ? 700 : 400,
                           }}
                         >
-                          {cell.ltp}
+                          {Math.round(cell.ltp)}
                         </td>
                       );
                     })}
